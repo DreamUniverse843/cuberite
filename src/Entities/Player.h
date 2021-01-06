@@ -50,10 +50,9 @@ public:
 
 	cPlayer(const cClientHandlePtr & a_Client, const AString & a_PlayerName);
 
-	virtual bool Initialize(OwnedEntity a_Self, cWorld & a_World) override;
-
 	virtual ~cPlayer() override;
 
+	virtual void OnAddToWorld(cWorld & a_World) override;
 	virtual void OnRemoveFromWorld(cWorld & a_World) override;
 
 	virtual void SpawnOn(cClientHandle & a_Client) override;
@@ -187,7 +186,7 @@ public:
 	eGameMode GetGameMode(void) const { return m_GameMode; }
 
 	/** Returns the current effective gamemode (inherited gamemode is resolved before returning) */
-	eGameMode GetEffectiveGameMode(void) const { return (m_GameMode == gmNotSet) ? m_World->GetGameMode() : m_GameMode; }
+	eGameMode GetEffectiveGameMode(void) const;
 
 	/** Sets the gamemode for the player.
 	The gamemode may be gmNotSet, in that case the player inherits the world's gamemode.
@@ -219,7 +218,7 @@ public:
 	/** Returns true if the player can be targeted by Mobs */
 	bool CanMobsTarget(void) const;
 
-	AString GetIP(void) const { return m_IP; }  // tolua_export
+	AString GetIP(void) const;  // tolua_export
 
 	/** Returns the associated team, nullptr if none */
 	cTeam * GetTeam(void) { return m_Team; }  // tolua_export
@@ -243,8 +242,6 @@ public:
 	If the achievement has been already awarded to the player, this method will just increment the stat counter. */
 	void AwardAchievement(Statistic a_Ach);
 
-	void SetIP(const AString & a_IP);
-
 	/** Forces the player to move in the given direction.
 	@deprecated Use SetSpeed instead. */
 	void ForceSetSpeed(const Vector3d & a_Speed);  // tolua_export
@@ -263,10 +260,12 @@ public:
 	/** Closes the current window if it matches the specified ID, resets current window to m_InventoryWindow */
 	void CloseWindowIfID(char a_WindowID, bool a_CanRefuse = true);
 
-	/** Returns the raw client handle associated with the player. */
 	cClientHandle * GetClientHandle(void) const { return m_ClientHandle.get(); }
 
 	// tolua_end
+
+	/** Returns the SharedPtr to client handle associated with the player. */
+	const cClientHandlePtr & GetClientHandlePtr(void) const { return m_ClientHandle; }
 
 	/** Get a copy of the PRNG for enchanting related generation, don't use this for other purposes.
 	The PRNG's state is initialised with an internal seed, such that until PermuteEnchantmentSeed is called, this function returns the same PRNG. */
@@ -274,9 +273,6 @@ public:
 
 	/** Permute the seed for enchanting related PRNGs, don't use this for other purposes. */
 	void PermuteEnchantmentSeed();
-
-	/** Returns the SharedPtr to client handle associated with the player. */
-	cClientHandlePtr GetClientHandlePtr(void) const { return m_ClientHandle; }
 
 	// tolua_begin
 
@@ -434,7 +430,7 @@ public:
 	*/
 	bool LoadFromFile(const AString & a_FileName, cWorldPtr & a_World);
 
-	const AString & GetLoadedWorldName() { return m_LoadedWorldName; }
+	const AString & GetLoadedWorldName() const { return m_LoadedWorldName; }
 
 	/** Opens the inventory of any tame horse the player is riding.
 	If the player is not riding a horse or if the horse is untamed, does nothing. */
@@ -451,13 +447,6 @@ public:
 	/** Damage the item in a_SlotNumber by a_Damage, possibly less if the
 	equipped item is enchanted. */
 	void UseItem(int a_SlotNumber, short a_Damage = 1);
-
-	void SendHealth(void);
-
-	// Send current active hotbar slot
-	void SendHotbarActiveSlot(void);
-
-	void SendExperience(void);
 
 	/** In UI windows, get the item that the player is dragging */
 	cItem & GetDraggingItem(void) {return m_DraggingItem; }  // tolua_export
@@ -598,10 +587,6 @@ public:
 	virtual void AttachTo(cEntity * a_AttachTo) override;
 	virtual void Detach(void) override;
 
-	/** Called by cClientHandle when the client is being destroyed.
-	The player removes its m_ClientHandle ownership so that the ClientHandle gets deleted. */
-	void RemoveClientHandle(void);
-
 	/** Returns the progress mined per tick for the block a_Block as a fraction
 	(1 would be completely mined)
 	Depends on hardness values so check those are correct.
@@ -691,7 +676,6 @@ protected:
 	cWorld * m_SpawnWorld;
 
 	eGameMode m_GameMode;
-	AString m_IP;
 
 	/** The item being dragged by the cursor while in a UI window */
 	cItem m_DraggingItem;
@@ -738,9 +722,6 @@ protected:
 	int m_CurrentXp;
 	unsigned int m_EnchantmentSeed;
 
-	// flag saying we need to send a xp update to client
-	bool m_bDirtyExperience;
-
 	bool m_IsChargingBow;
 	int  m_BowCharge;
 
@@ -780,8 +761,6 @@ protected:
 
 	/** List of known items as Ids */
 	std::set<cItem, cItem::sItemCompare> m_KnownItems;
-
-	virtual void DoMoveToWorld(const cEntity::sWorldChangeInfo & a_WorldChangeInfo) override;
 
 	/** Sets the speed and sends it to the client, so that they are forced to move so. */
 	virtual void DoSetSpeed(double a_SpeedX, double a_SpeedY, double a_SpeedZ) override;

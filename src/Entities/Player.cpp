@@ -99,7 +99,6 @@ cPlayer::cPlayer(const cClientHandlePtr & a_Client, const AString & a_PlayerName
 	m_CurrentWindow(nullptr),
 	m_InventoryWindow(nullptr),
 	m_GameMode(eGameMode_NotSet),
-	m_IP(""),
 	m_ClientHandle(a_Client),
 	m_IsFrozen(false),
 	m_NormalMaxSpeed(1.0),
@@ -113,7 +112,6 @@ cPlayer::cPlayer(const cClientHandlePtr & a_Client, const AString & a_PlayerName
 	m_EatingFinishTick(-1),
 	m_LifetimeTotalXp(0),
 	m_CurrentXp(0),
-	m_bDirtyExperience(false),
 	m_IsChargingBow(false),
 	m_BowCharge(0),
 	m_FloaterID(cEntity::INVALID_ID),
@@ -127,6 +125,9 @@ cPlayer::cPlayer(const cClientHandlePtr & a_Client, const AString & a_PlayerName
 	m_MainHand(mhRight)
 {
 	ASSERT(a_PlayerName.length() <= 16);  // Otherwise this player could crash many clients...
+
+	// Atomically increment player count (in server thread):
+	cRoot::Get()->GetServer()->PlayerCreated();
 
 	m_InventoryWindow = new cInventoryWindow(*this);
 	m_CurrentWindow = m_InventoryWindow;
@@ -149,8 +150,6 @@ cPlayer::cPlayer(const cClientHandlePtr & a_Client, const AString & a_PlayerName
 		// This is a new player. Set the player spawn point to the spawn point of the default world
 		SetBedPos(Vector3i(static_cast<int>(World->GetSpawnX()), static_cast<int>(World->GetSpawnY()), static_cast<int>(World->GetSpawnZ())), World);
 
-		SetWorld(World);  // Use default world
-
 		m_EnchantmentSeed = GetRandomProvider().RandInt<unsigned int>();  // Use a random number to seed the enchantment generator
 
 		FLOGD("Player \"{0}\" is connecting for the first time, spawning at default world spawn {1:.2f}",
@@ -160,7 +159,6 @@ cPlayer::cPlayer(const cClientHandlePtr & a_Client, const AString & a_PlayerName
 
 	m_LastGroundHeight = static_cast<float>(GetPosY());
 	m_Stance = GetPosY() + 1.62;
-
 
 	if (m_GameMode == gmNotSet)
 	{
@@ -181,20 +179,12 @@ cPlayer::cPlayer(const cClientHandlePtr & a_Client, const AString & a_PlayerName
 		m_IsFlying = true;
 		m_bVisible = false;
 	}
-}
 
-
-
-
-
-bool cPlayer::Initialize(OwnedEntity a_Self, cWorld & a_World)
-{
-	UNUSED(a_World);
-	ASSERT(GetWorld() != nullptr);
-	ASSERT(GetParentChunk() == nullptr);
-	GetWorld()->AddPlayer(std::unique_ptr<cPlayer>(static_cast<cPlayer *>(a_Self.release())));
-
-	cPluginManager::Get()->CallHookSpawnedEntity(*GetWorld(), *this);
+	// Send resource packs:
+	if (const auto ResourcePackUrl = cRoot::Get()->GetServer()->GetResourcePackUrl(); !ResourcePackUrl.empty())
+	{
+		m_ClientHandle->SendResourcePack(ResourcePackUrl);
+	}
 
 	if (m_KnownRecipes.empty())
 	{
@@ -208,7 +198,22 @@ bool cPlayer::Initialize(OwnedEntity a_Self, cWorld & a_World)
 		}
 	}
 
-	return true;
+	// Send hotbar active slot:
+	m_ClientHandle->SendHeldItemChange(m_Inventory.GetEquippedSlotNum());
+
+	// Send player list items:
+	m_ClientHandle->SendPlayerListAddPlayer(*this);  // Add ourself
+	cRoot::Get()->BroadcastPlayerListsAddPlayer(*this);  // Add ourself to every else
+	cRoot::Get()->SendPlayerLists(this);  // Add everyone else to ourself
+
+	// Send statistics:
+	m_ClientHandle->SendStatistics(m_Stats);
+
+	if (!cRoot::Get()->GetPluginManager()->CallHookPlayerJoined(*this))
+	{
+		cRoot::Get()->BroadcastChatJoin(Printf("%s has joined the game", m_PlayerName.c_str()));
+		LOGINFO("Player %s has joined the game", m_PlayerName.c_str());
+	}
 }
 
 
@@ -258,20 +263,26 @@ void cPlayer::AddKnownRecipe(UInt32 a_RecipeId)
 
 cPlayer::~cPlayer(void)
 {
+	LOGD("Deleting cPlayer \"%s\" at %p, ID %d", GetName().c_str(), static_cast<void *>(this), GetUniqueID());
+
 	if (!cRoot::Get()->GetPluginManager()->CallHookPlayerDestroyed(*this))
 	{
 		cRoot::Get()->BroadcastChatLeave(Printf("%s has left the game", GetName().c_str()));
 		LOGINFO("Player %s has left the game", GetName().c_str());
 	}
 
-	LOGD("Deleting cPlayer \"%s\" at %p, ID %d", GetName().c_str(), static_cast<void *>(this), GetUniqueID());
+	// Remove ourself from everyone's lists:
+	cRoot::Get()->BroadcastPlayerListsRemovePlayer(*this);
+
+	// Atomically decrement player count (in world thread):
+	cRoot::Get()->GetServer()->PlayerDestroyed();
+
+	// "Times ragequit":
+	m_Stats.AddValue(Statistic::LeaveGame);
 
 	SaveToDisk();
 
-	m_ClientHandle = nullptr;
-
 	delete m_InventoryWindow;
-	m_InventoryWindow = nullptr;
 
 	LOGD("Player %p deleted", static_cast<void *>(this));
 }
@@ -280,9 +291,84 @@ cPlayer::~cPlayer(void)
 
 
 
+void cPlayer::OnAddToWorld(cWorld & a_World)
+{
+	Super::OnAddToWorld(a_World);
+
+	// Fix to stop the player falling through the world, until we get serversided collision detection:
+	FreezeInternal(GetPosition(), false);
+
+	// Set capabilities based on new world:
+	SetCapabilities();
+
+	// Send contents of the inventory window:
+	m_ClientHandle->SendWholeInventory(*m_CurrentWindow);
+
+	// Send health (the respawn packet, which understandably resets health, is also used for world travel...):
+	m_ClientHandle->SendHealth();
+
+	// Send experience, similar story with the respawn packet:
+	m_ClientHandle->SendExperience();
+
+	// Update player team:
+	UpdateTeam();
+
+	// Send scoreboard data:
+	m_World->GetScoreBoard().SendTo(*m_ClientHandle);
+
+	// Update the view distance:
+	m_ClientHandle->SetViewDistance(m_ClientHandle->GetRequestedViewDistance());
+
+	// Send current weather of target world:
+	m_ClientHandle->SendWeather(a_World.GetWeather());
+
+	// Send time:
+	m_ClientHandle->SendTimeUpdate(a_World.GetWorldAge(), a_World.GetTimeOfDay(), a_World.IsDaylightCycleEnabled());
+
+	// Finally, deliver the notification hook:
+	cRoot::Get()->GetPluginManager()->CallHookPlayerSpawned(*this);
+}
+
+
+
+
+
 void cPlayer::OnRemoveFromWorld(cWorld & a_World)
 {
+	Super::OnRemoveFromWorld(a_World);
+
+	// Remove any references to this player pointer by windows in the old world:
 	CloseWindow(false);
+
+	// Remove the client handle fro the world:
+	m_World->RemoveClientFromChunks(m_ClientHandle.get());
+
+	if (!IsWorldChangeScheduled())
+	{
+		// We're just disconnecting. The remaining code deals with going through portals, so bail:
+		return;
+	}
+
+	const auto DestinationDimension = m_WorldChangeInfo.m_NewWorld->GetDimension();
+
+	// Award relevant achievements:
+	if (DestinationDimension == dimEnd)
+	{
+		AwardAchievement(Statistic::AchTheEnd);
+	}
+	else if (DestinationDimension == dimNether)
+	{
+		AwardAchievement(Statistic::AchPortal);
+	}
+
+	// Clear sent chunk lists from the clienthandle:
+	m_ClientHandle->RemoveFromWorld();
+
+	// The clienthandle caches the coords of the chunk we're standing at. Invalidate this.
+	m_ClientHandle->InvalidateCachedSentChunk();
+
+	// Clientside warp start:
+	m_ClientHandle->SendRespawn(DestinationDimension, false);
 }
 
 
@@ -313,30 +399,23 @@ void cPlayer::SpawnOn(cClientHandle & a_Client)
 
 void cPlayer::Tick(std::chrono::milliseconds a_Dt, cChunk & a_Chunk)
 {
-	if (m_ClientHandle != nullptr)
-	{
-		if (m_ClientHandle->IsDestroyed())
-		{
-			// This should not happen, because destroying a client will remove it from the world, but just in case
-			ASSERT(!"Player ticked whilst in the process of destruction!");
-			m_ClientHandle = nullptr;
-			return;
-		}
+	m_ClientHandle->Tick(a_Dt.count());
 
-		if (!m_ClientHandle->IsPlaying())
-		{
-			// We're not yet in the game, ignore everything
-			return;
-		}
-	}
-	else
+	if (m_ClientHandle->IsDestroyed())
 	{
-		ASSERT(!"Player ticked whilst in the process of destruction!");
+		Destroy();
+		return;
 	}
 
+	if (!m_ClientHandle->IsPlaying())
+	{
+		// We're not yet in the game, ignore everything:
+		return;
+	}
 
 	m_Stats.AddValue(Statistic::PlayOneMinute);
 	m_Stats.AddValue(Statistic::TimeSinceDeath);
+
 	if (IsCrouched())
 	{
 		m_Stats.AddValue(Statistic::SneakTime);
@@ -356,15 +435,26 @@ void cPlayer::Tick(std::chrono::milliseconds a_Dt, cChunk & a_Chunk)
 		Detach();
 	}
 
-	// Handle a frozen player
+	if (!a_Chunk.IsValid())
+	{
+		// Players are ticked even if the parent chunk is invalid.
+		// We've processed as much as we can, bail:
+		return;
+	}
+
+	ASSERT((GetParentChunk() != nullptr) && (GetParentChunk()->IsValid()));
+	ASSERT(a_Chunk.IsValid());
+
+	// Handle a frozen player:
 	TickFreezeCode();
-	if (m_IsFrozen)
+
+	if (
+		m_IsFrozen ||  // Don't do Tick updates if frozen
+		IsWorldChangeScheduled()  // If we're about to change worlds (e.g. respawn), abort processing all world interactions (GH #3939)
+	)
 	{
 		return;
 	}
-	ASSERT((GetParentChunk() != nullptr) && (GetParentChunk()->IsValid()));
-
-	ASSERT(a_Chunk.IsValid());
 
 	Super::Tick(a_Dt, a_Chunk);
 
@@ -372,12 +462,6 @@ void cPlayer::Tick(std::chrono::milliseconds a_Dt, cChunk & a_Chunk)
 	if (m_IsChargingBow)
 	{
 		m_BowCharge += 1;
-	}
-
-	// Handle updating experience
-	if (m_bDirtyExperience)
-	{
-		SendExperience();
 	}
 
 	BroadcastMovementUpdate(m_ClientHandle.get());
@@ -558,8 +642,8 @@ bool cPlayer::SetCurrentExperience(int a_CurrentXp)
 
 	m_CurrentXp = a_CurrentXp;
 
-	// Set experience to be updated
-	m_bDirtyExperience = true;
+	// Update experience:
+	m_ClientHandle->SendExperience();
 
 	return true;
 }
@@ -591,8 +675,8 @@ int cPlayer::DeltaExperience(int a_Xp_delta)
 
 	LOGD("Player \"%s\" gained / lost %d experience, total is now: %d", GetName().c_str(), a_Xp_delta, m_CurrentXp);
 
-	// Set experience to be updated
-	m_bDirtyExperience = true;
+	// Set experience to be updated:
+	m_ClientHandle->SendExperience();
 
 	return m_CurrentXp;
 }
@@ -661,7 +745,7 @@ void cPlayer::SetTouchGround(bool a_bTouchGround)
 void cPlayer::Heal(int a_Health)
 {
 	Super::Heal(a_Health);
-	SendHealth();
+	m_ClientHandle->SendHealth();
 }
 
 
@@ -679,7 +763,7 @@ void cPlayer::SetFoodLevel(int a_FoodLevel)
 	}
 
 	m_FoodLevel = FoodLevel;
-	SendHealth();
+	m_ClientHandle->SendHealth();
 }
 
 
@@ -801,43 +885,6 @@ void cPlayer::AbortEating(void)
 {
 	m_EatingFinishTick = -1;
 	m_World->BroadcastEntityMetadata(*this);
-}
-
-
-
-
-
-void cPlayer::SendHealth(void)
-{
-	if (m_ClientHandle != nullptr)
-	{
-		m_ClientHandle->SendHealth();
-	}
-}
-
-
-
-
-
-void cPlayer::SendHotbarActiveSlot(void)
-{
-	if (m_ClientHandle != nullptr)
-	{
-		m_ClientHandle->SendHeldItemChange(m_Inventory.GetEquippedSlotNum());
-	}
-}
-
-
-
-
-
-void cPlayer::SendExperience(void)
-{
-	if (m_ClientHandle != nullptr)
-	{
-		m_ClientHandle->SendExperience();
-		m_bDirtyExperience = false;
-	}
 }
 
 
@@ -1007,7 +1054,7 @@ void cPlayer::SetCustomName(const AString & a_CustomName)
 	}
 
 	m_World->BroadcastPlayerListAddPlayer(*this);
-	m_World->BroadcastSpawnEntity(*this, GetClientHandle());
+	m_World->BroadcastSpawnEntity(*this, m_ClientHandle.get());
 }
 
 
@@ -1106,7 +1153,7 @@ bool cPlayer::DoTakeDamage(TakeDamageInfo & a_TDI)
 	{
 		// Any kind of damage adds food exhaustion
 		AddFoodExhaustion(0.3f);
-		SendHealth();
+		m_ClientHandle->SendHealth();
 
 		// Tell the wolves
 		if (a_TDI.Attacker != nullptr)
@@ -1296,17 +1343,16 @@ void cPlayer::Respawn(void)
 	m_LifetimeTotalXp = 0;
 	// ToDo: send score to client? How?
 
-	m_ClientHandle->SendRespawn(m_SpawnWorld->GetDimension(), true);
-
 	// Extinguish the fire:
 	StopBurning();
 
-	if (GetWorld() != m_SpawnWorld)
+	if (m_World != m_SpawnWorld)
 	{
 		MoveToWorld(*m_SpawnWorld, GetLastBedPos(), false, false);
 	}
 	else
 	{
+		m_ClientHandle->SendRespawn(m_World->GetDimension(), true);
 		TeleportToCoords(GetLastBedPos().x, GetLastBedPos().y, GetLastBedPos().z);
 	}
 
@@ -1374,6 +1420,15 @@ bool cPlayer::IsGameModeSpectator(void) const
 bool cPlayer::CanMobsTarget(void) const
 {
 	return (IsGameModeSurvival() || IsGameModeAdventure()) && (m_Health > 0);
+}
+
+
+
+
+
+AString cPlayer::GetIP(void) const
+{
+	return m_ClientHandle->GetIPString();
 }
 
 
@@ -1671,15 +1726,6 @@ void cPlayer::SetCapabilities()
 
 
 
-void cPlayer::SetIP(const AString & a_IP)
-{
-	m_IP = a_IP;
-}
-
-
-
-
-
 void cPlayer::AwardAchievement(const Statistic a_Ach)
 {
 	// Check if the prerequisites are met:
@@ -1753,7 +1799,7 @@ void cPlayer::Unfreeze()
 	GetClientHandle()->SendPlayerMaxSpeed();
 
 	m_IsFrozen = false;
-	BroadcastMovementUpdate(GetClientHandle());
+	BroadcastMovementUpdate(m_ClientHandle.get());
 	GetClientHandle()->SendPlayerPosition();
 }
 
@@ -1813,6 +1859,29 @@ Vector3d cPlayer::GetThrowSpeed(double a_SpeedCoeff) const
 	// TODO: Add a slight random change (+-0.0075 in each direction)
 
 	return res * a_SpeedCoeff;
+}
+
+
+
+
+
+eGameMode cPlayer::GetEffectiveGameMode(void) const
+{
+	// Since entities' m_World aren't set until Initialize, but cClientHandle sends the player's gamemode early
+	// the below block deals with m_World being nullptr when called.
+
+	auto World = m_World;
+
+	if (World == nullptr)
+	{
+		World = cRoot::Get()->GetDefaultWorld();
+	}
+	else if (IsWorldChangeScheduled())
+	{
+		World = m_WorldChangeInfo.m_NewWorld;
+	}
+
+	return (m_GameMode == gmNotSet) ? World->GetGameMode() : m_GameMode;
 }
 
 
@@ -2093,79 +2162,6 @@ void cPlayer::TossPickup(const cItem & a_Item)
 	Drops.push_back(a_Item);
 
 	TossItems(Drops);
-}
-
-
-
-
-
-void cPlayer::DoMoveToWorld(const cEntity::sWorldChangeInfo & a_WorldChangeInfo)
-{
-	ASSERT(a_WorldChangeInfo.m_NewWorld != nullptr);
-
-	// Reset portal cooldown
-	if (a_WorldChangeInfo.m_SetPortalCooldown)
-	{
-		m_PortalCooldownData.m_TicksDelayed = 0;
-		m_PortalCooldownData.m_ShouldPreventTeleportation = true;
-	}
-
-	if (m_World == a_WorldChangeInfo.m_NewWorld)
-	{
-		// Moving to same world, don't need to remove from world
-		SetPosition(a_WorldChangeInfo.m_NewPosition);
-		return;
-	}
-
-	LOGD("Warping player \"%s\" from world \"%s\" to \"%s\". Source chunk: (%d, %d) ",
-		GetName(), GetWorld()->GetName(), a_WorldChangeInfo.m_NewWorld->GetName(),
-		GetChunkX(), GetChunkZ()
-	);
-
-	// Stop all mobs from targeting this player
-	StopEveryoneFromTargetingMe();
-
-	// If player is attached to entity, detach, to prevent client side effects
-	Detach();
-
-	// Prevent further ticking in this world
-	SetIsTicking(false);
-
-	// Remove from the old world
-	auto & OldWorld = *GetWorld();
-	auto Self = OldWorld.RemovePlayer(*this);
-
-	ResetPosition(a_WorldChangeInfo.m_NewPosition);
-	FreezeInternal(a_WorldChangeInfo.m_NewPosition, false);
-	SetWorld(a_WorldChangeInfo.m_NewWorld);  // Chunks may be streamed before cWorld::AddPlayer() sets the world to the new value
-
-	// Set capabilities based on new world
-	SetCapabilities();
-
-	cClientHandle * ch = GetClientHandle();
-	if (ch != nullptr)
-	{
-		// The clienthandle caches the coords of the chunk we're standing at. Invalidate this.
-		ch->InvalidateCachedSentChunk();
-
-		// Send the respawn packet:
-		if (a_WorldChangeInfo.m_SendRespawn)
-		{
-			ch->SendRespawn(a_WorldChangeInfo.m_NewWorld->GetDimension());
-		}
-
-		// Update the view distance.
-		ch->SetViewDistance(ch->GetRequestedViewDistance());
-
-		// Send current weather of target world to player
-		if (a_WorldChangeInfo.m_NewWorld->GetDimension() == dimOverworld)
-		{
-			ch->SendWeather(a_WorldChangeInfo.m_NewWorld->GetWeather());
-		}
-	}
-
-	// New world will take over and announce client at its next tick
-	a_WorldChangeInfo.m_NewWorld->AddPlayer(std::move(Self), &OldWorld);
 }
 
 
@@ -3056,16 +3052,6 @@ void cPlayer::Detach()
 			}
 		}
 	}
-}
-
-
-
-
-
-void cPlayer::RemoveClientHandle(void)
-{
-	ASSERT(m_ClientHandle != nullptr);
-	m_ClientHandle.reset();
 }
 
 

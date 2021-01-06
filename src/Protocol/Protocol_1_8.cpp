@@ -671,8 +671,7 @@ void cProtocol_1_8_0::SendHeldItemChange(int a_ItemIndex)
 	ASSERT((a_ItemIndex >= 0) && (a_ItemIndex <= 8));  // Valid check
 
 	cPacketizer Pkt(*this, pktHeldItemChange);
-	cPlayer * Player = m_Client->GetPlayer();
-	Pkt.WriteBEInt8(static_cast<Int8>(Player->GetInventory().GetEquippedSlotNum()));
+	Pkt.WriteBEInt8(static_cast<Int8>(a_ItemIndex));
 }
 
 

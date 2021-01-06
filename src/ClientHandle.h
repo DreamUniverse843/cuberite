@@ -45,7 +45,7 @@ typedef std::shared_ptr<cClientHandle> cClientHandlePtr;
 
 
 class cClientHandle  // tolua_export
-	: public cTCPLink::cCallbacks
+	: public cTCPLink::cCallbacks, public std::enable_shared_from_this<cClientHandle>
 {  // tolua_export
 public:  // tolua_export
 
@@ -64,8 +64,6 @@ public:  // tolua_export
 
 	/** Creates a new client with the specified IP address in its description and the specified initial view distance. */
 	cClientHandle(const AString & a_IPString, int a_ViewDistance);
-
-	virtual ~cClientHandle() override;
 
 	const AString & GetIPString(void) const { return m_IPString; }  // tolua_export
 
@@ -136,7 +134,6 @@ public:  // tolua_export
 
 	bool IsPlaying   (void) const { return (m_State == csPlaying); }
 	bool IsDestroyed (void) const { return (m_State == csDestroyed); }
-	bool IsDestroying(void) const { return (m_State == csDestroying); }
 
 	// The following functions send the various packets:
 	// (Please keep these alpha-sorted)
@@ -196,7 +193,7 @@ public:  // tolua_export
 	void SendRemoveEntityEffect         (const cEntity & a_Entity, int a_EffectID);
 	void SendResourcePack               (const AString & a_ResourcePackUrl);
 	void SendResetTitle                 (void);  // tolua_export
-	void SendRespawn                    (eDimension a_Dimension, bool a_ShouldIgnoreDimensionChecks = false);
+	void SendRespawn                    (eDimension a_Dimension, bool a_ShouldIgnoreDimensionChecks);
 	void SendScoreUpdate                (const AString & a_Objective, const AString & a_Player, cObjective::Score a_Score, Byte a_Mode);
 	void SendScoreboardObjective        (const AString & a_Name, const AString & a_DisplayName, Byte a_Mode);
 	void SendSetSubTitle                (const cCompositeChat & a_SubTitle);  // tolua_export
@@ -400,9 +397,6 @@ public:  // tolua_export
 	bool IsPlayerChunkSent();
 
 private:
-	/** The dimension that was last sent to a player in a Respawn or Login packet.
-	Used to avoid Respawning into the same dimension, which confuses the client. */
-	eDimension m_LastSentDimension;
 
 	friend class cServer;  // Needs access to SetSelf()
 
@@ -446,16 +440,7 @@ private:
 	/** Protects m_OutgoingData against multithreaded access. */
 	cCriticalSection m_CSOutgoingData;
 
-	/** Buffer for storing outgoing data from any thread; will get sent in Tick() (to prevent deadlocks).
-	Protected by m_CSOutgoingData. */
-	AString m_OutgoingData;
-
-	Vector3d m_ConfirmPosition;
-
 	cPlayer * m_Player;
-
-	// Temporary (#3115-will-fix): maintain temporary ownership of created cPlayer objects while they are in limbo
-	std::unique_ptr<cPlayer> m_PlayerPtr;
 
 	/** This is an optimization which saves you an iteration of m_SentChunks if you just want to know
 	whether or not the player is standing at a sent chunk.
@@ -499,12 +484,8 @@ private:
 	{
 		csConnected,             ///< The client has just connected, waiting for their handshake / login
 		csAuthenticating,        ///< The client has logged in, waiting for external authentication
-		csAuthenticated,         ///< The client has been authenticated, will start streaming chunks in the next tick
 		csDownloadingWorld,      ///< The client is waiting for chunks, we're waiting for the loader to provide and send them
 		csPlaying,               ///< Normal gameplay
-		csKicked,                ///< Disconnect packet sent, awaiting connection closure
-		csQueuedForDestruction,  ///< The client will be destroyed in the next tick (flag set when socket closed)
-		csDestroying,            ///< The client is being destroyed, don't queue any more packets / don't add to chunks
 		csDestroyed,             ///< The client has been destroyed, the destructor is to be called from the owner thread
 	} ;
 
@@ -554,9 +535,6 @@ private:
 	m_CSOutgoingData is used to synchronize access for sending data. */
 	cTCPLinkPtr m_Link;
 
-	/** Shared pointer to self, so that this instance can keep itself alive when needed. */
-	cClientHandlePtr m_Self;
-
 	/** The fraction between 0 and 1 (or above), of how far through mining the currently mined block is.
 	0 for just started, 1 and above for broken. Used for anti-cheat. */
 	float m_BreakProgress;
@@ -591,16 +569,13 @@ private:
 	/** Called when the network socket has been closed. */
 	void SocketClosed(void);
 
-	/** Called right after the instance is created to store its SharedPtr inside. */
-	void SetSelf(cClientHandlePtr a_Self);
-
 	/** Called to update m_State.
 	Only succeeds if a_NewState > m_State, otherwise returns false. */
 	bool SetState(eState a_NewState);
 
-	/** Processes the data in the network input and output buffers.
+	/** Processes the data in the network input buffer.
 	Called by both Tick() and ServerTick(). */
-	void ProcessProtocolInOut(void);
+	void ProcessProtocolIn(void);
 
 	// cTCPLink::cCallbacks overrides:
 	virtual void OnLinkCreated(cTCPLinkPtr a_Link) override;
