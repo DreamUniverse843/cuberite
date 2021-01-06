@@ -1863,7 +1863,7 @@ void cClientHandle::SendData(const char * a_Data, size_t a_Size)
 	if (auto Link = m_Link; Link != nullptr)
 	{
 		cCSLock Lock(m_CSOutgoingData);
-		m_Link->Send(a_Data, a_Size);
+		Link->Send(a_Data, a_Size);
 	}
 }
 

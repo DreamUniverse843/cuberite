@@ -180,7 +180,7 @@ cPlayer::cPlayer(const cClientHandlePtr & a_Client, const AString & a_PlayerName
 		m_bVisible = false;
 	}
 
-	// Send resource packs:
+	// Send resource pack:
 	if (const auto ResourcePackUrl = cRoot::Get()->GetServer()->GetResourcePackUrl(); !ResourcePackUrl.empty())
 	{
 		m_ClientHandle->SendResourcePack(ResourcePackUrl);
@@ -203,7 +203,7 @@ cPlayer::cPlayer(const cClientHandlePtr & a_Client, const AString & a_PlayerName
 
 	// Send player list items:
 	m_ClientHandle->SendPlayerListAddPlayer(*this);  // Add ourself
-	cRoot::Get()->BroadcastPlayerListsAddPlayer(*this);  // Add ourself to every else
+	cRoot::Get()->BroadcastPlayerListsAddPlayer(*this);  // Add ourself to everyone else
 	cRoot::Get()->SendPlayerLists(this);  // Add everyone else to ourself
 
 	// Send statistics:
