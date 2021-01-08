@@ -1,40 +1,38 @@
-# Cuberite
+# Cubarite - 开源的 C++  Minecraft 启动器
 
-[![Build Status](https://img.shields.io/travis/cuberite/cuberite/master.svg?label=Travis)](https://travis-ci.org/cuberite/cuberite)
-[![Circle CI Build Status](https://img.shields.io/circleci/project/github/cuberite/cuberite/master.svg?label=Circle)](https://circleci.com/gh/cuberite/cuberite)
-[![AppVeyor Build Status](https://img.shields.io/appveyor/ci/cuberite/cuberite/master.svg?label=AppVeyor)](https://ci.appveyor.com/project/cuberite/cuberite)
+请注意：此Respositary仅为自用，非官方代理。
+原项目:https://github.com/cuberite/cuberite
+为便于贡献，以下为从原README.md的翻译。
 
-Cuberite is a Minecraft-compatible multiplayer game server that is written in C++ and designed to be efficient with memory and CPU, as well as having a flexible Lua Plugin API. Cuberite is compatible with the Java Edition Minecraft client.
+Cuberite是Minecraft兼容的多人游戏客户端，用C ++编写，旨在通过内存和CPU高效运行，并具有灵活的Lua插件API。
+Cuberite与Java原版Minecraft客户端兼容。
+Cuberite可在Windows，* nix和Android操作系统上运行。 这包括Android手机、平板电脑以及Raspberry Pi。
+目前，我们支持1.8-1.12.2 之间的Minecraft版本。
 
-Cuberite runs on Windows, *nix and Android operating systems. This includes Android phones and tablets as well as Raspberry Pis.
+## 安装
 
-Currently we support Release 1.8 - 1.12.2 Minecraft protocol versions.
+有多种方式可为此项目进行配置。
 
-Subscribe to [the newsletter][1] for important updates and project news.
+### 贡献方式
 
-## Installation
+- 可直接下载本Repo。
+- 可下载Cuberite官方的下载脚本进行快速配置（可能不会与本Repo同步）
 
-There are several ways to obtain Cuberite.
+#### 安装脚本
 
-### Binaries
-
-- The easiest method is downloading for Windows or Linux from the [website][2].
-- You can use the EasyInstall script for Linux and macOS, which automatically downloads the correct binary. The script is described below.
-
-#### The EasyInstall script
-
-This script will download the correct binary from the project site.
+下列官方脚本将提供正确的源文件：
 
     curl -sSfL https://download.cuberite.org | sh
 
-### Compiling
+### 编译
 
-- You can compile automatically for Linux, macOS and FreeBSD with the `compile.sh` script. The script is described below.
-- You can also compile manually. See [COMPILING.md][4].
+- 您可以使用项目内随附的 `compile.sh`脚本进行编译。 下方对它有详细描述。
+- 您也可以手动编译。 详见项目内的 COMPILING.md 。
 
-Compiling may provide better performance (1.5-3x as fast) and it supports more operating systems.
+手动编译可能会提供更好的兼容效果与跨平台性能。
 
-#### The compile.sh script
+下述讯息对本Repo无帮助，弃用。
+#### Compilling script
 
 This script downloads the source code and compiles it. The script is smart enough to notify you of missing dependencies and instructing you on how to install them. The script doesn't work for Windows.
 
